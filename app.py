@@ -23,7 +23,7 @@ from utils.transcript import extract_video_id, get_transcript, format_timestamp,
 from utils.video import get_video_info, download_video, extract_frames, format_view_count, format_upload_date
 from utils.ocr import extract_text_from_image, deduplicate_texts
 from utils.transparency import is_transparency_url, extract_youtube_from_transparency
-from utils.gemini_analysis import analyze_video_with_gemini
+from utils.gemini_analysis import analyze_with_url, analyze_with_file_bytes
 
 st.set_page_config(
     page_title="YouTube 영상 분석기",
@@ -323,8 +323,8 @@ if st.session_state.analyzed:
     # ── 탭 4: AI 영상 분석 (Gemini) ─────────────────────────────
     with tab4:
         st.markdown("""
-**Gemini가 YouTube 영상을 직접 분석합니다.**
-다운로드 없이 URL만으로 편집 자막 · 화면 구성 · 스토리 흐름 · 바이럴 요소를 분석합니다.
+**Gemini가 실제 영상을 직접 분석합니다.**
+편집 자막 · 화면 구성 · 스토리 흐름 · 바이럴 요소를 분석합니다.
         """)
 
         api_key = _get_gemini_api_key()
@@ -349,12 +349,50 @@ if st.session_state.analyzed:
                 st.session_state.gemini_result = None
                 st.rerun()
         else:
-            st.info("YouTube URL을 Gemini에 직접 전달합니다. 영상 길이에 따라 30초~2분 소요됩니다.")
-            if st.button("AI 영상 분석 시작", key="gemini_btn", type="primary"):
-                with st.spinner("Gemini가 영상을 분석하는 중..."):
+            # ── 방법 1: 영상 파일 직접 업로드 (권장) ─────────────
+            st.markdown("#### 방법 1: 영상 파일 업로드 (권장)")
+            st.caption("YouTube에서 다운로드한 MP4/MOV 파일을 업로드하면 Gemini가 실제 영상을 분석합니다.")
+
+            uploaded_video = st.file_uploader(
+                "영상 파일 선택 (MP4, MOV · 최대 200MB)",
+                type=["mp4", "mov"],
+                key="gemini_video_upload",
+            )
+
+            if uploaded_video:
+                if st.button("파일로 AI 분석 시작", key="gemini_file_btn", type="primary"):
+                    video_bytes = uploaded_video.read()
+                    mime_type = "video/quicktime" if uploaded_video.name.lower().endswith(".mov") else "video/mp4"
+                    with st.spinner("Gemini에 파일 업로드 및 분석 중... (1~3분 소요)"):
+                        try:
+                            result = analyze_with_file_bytes(video_bytes, mime_type, api_key)
+                            st.session_state.gemini_result = result
+                            st.toast("✅ AI 분석 완료!")
+                            st.markdown(
+                                f'<div class="gemini-result">{result}</div>',
+                                unsafe_allow_html=True,
+                            )
+                            st.download_button(
+                                label="AI 분석 결과 다운로드 (.txt)",
+                                data=result,
+                                file_name=f"{video_id}_ai_analysis.txt",
+                                mime="text/plain",
+                            )
+                        except Exception as e:
+                            st.error(f"분석 실패: {e}")
+
+            st.markdown("---")
+
+            # ── 방법 2: YouTube URL 직접 시도 ─────────────────────
+            st.markdown("#### 방법 2: YouTube URL로 직접 분석 (API 권한에 따라 작동 여부 다름)")
+            st.caption("일부 API 키 설정에서는 작동하지 않을 수 있습니다. 실패 시 방법 1을 이용하세요.")
+
+            if st.button("URL로 AI 분석 시작", key="gemini_url_btn"):
+                with st.spinner("Gemini가 YouTube 영상을 분석하는 중..."):
                     try:
-                        result = analyze_video_with_gemini(youtube_url, api_key)
+                        result = analyze_with_url(youtube_url, api_key)
                         st.session_state.gemini_result = result
+                        st.toast("✅ AI 분석 완료!")
                         st.markdown(
                             f'<div class="gemini-result">{result}</div>',
                             unsafe_allow_html=True,
@@ -366,4 +404,10 @@ if st.session_state.analyzed:
                             mime="text/plain",
                         )
                     except Exception as e:
-                        st.error(f"분석 실패: {e}")
+                        if "403" in str(e) or "PERMISSION" in str(e):
+                            st.warning(
+                                "YouTube URL 직접 분석 권한이 없습니다. "
+                                "위의 '방법 1: 영상 파일 업로드'를 이용해주세요."
+                            )
+                        else:
+                            st.error(f"분석 실패: {e}")

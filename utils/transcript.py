@@ -70,7 +70,7 @@ def get_transcript(video_id: str) -> tuple[list[dict] | None, str]:
     except (TranscriptsDisabled, VideoUnavailable) as e:
         return None, f"자막 비활성화 또는 영상 접근 불가"
     except Exception as e:
-        return None, f"자막 오류: {str(e)[:80]}"
+        return None, f"자막 오류: {str(e)}"
 
 
 def _to_dicts(fetched) -> list[dict]:
