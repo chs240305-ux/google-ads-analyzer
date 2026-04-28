@@ -64,6 +64,9 @@ for key, default in [
     ("last_url", None),
     ("ocr_results", None),
     ("gemini_result", None),
+    ("transcript", None),
+    ("transcript_source", None),
+    ("transcript_loaded_for", None),
 ]:
     if key not in st.session_state:
         st.session_state[key] = default
@@ -208,8 +211,15 @@ if st.session_state.analyzed:
 
     # ── 탭 1: 자막 ─────────────────────────────────────────────
     with tab1:
-        with st.spinner("자막을 가져오는 중..."):
-            transcript, transcript_source = get_transcript(video_id)
+        if st.session_state.transcript_loaded_for != video_id:
+            with st.spinner("자막을 가져오는 중..."):
+                transcript, transcript_source = get_transcript(video_id)
+            st.session_state.transcript = transcript
+            st.session_state.transcript_source = transcript_source
+            st.session_state.transcript_loaded_for = video_id
+        else:
+            transcript = st.session_state.transcript
+            transcript_source = st.session_state.transcript_source
 
         if transcript:
             st.success(f"자막 {len(transcript)}개 항목을 불러왔습니다. ({transcript_source})")
