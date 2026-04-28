@@ -1,42 +1,34 @@
 from __future__ import annotations
 
-import easyocr
+import pytesseract
 import numpy as np
 from PIL import Image
-
-_reader = None
-
-
-def get_reader() -> easyocr.Reader:
-    global _reader
-    if _reader is None:
-        _reader = easyocr.Reader(["ko", "en"], gpu=False, verbose=False)
-    return _reader
 
 
 def extract_text_from_image(image: Image.Image) -> list[dict]:
     """
-    Returns list of {text, confidence, bbox} from a PIL Image.
+    Returns list of {text, confidence} from a PIL Image.
+    Uses Tesseract with Korean + English language pack.
     """
-    reader = get_reader()
-    img_array = np.array(image)
-    results = reader.readtext(img_array)
+    config = "--oem 3 --psm 6 -l kor+eng"
+    data = pytesseract.image_to_data(
+        image, config=config, output_type=pytesseract.Output.DICT
+    )
 
     texts = []
-    for bbox, text, confidence in results:
-        if confidence > 0.3 and text.strip():
+    for i, text in enumerate(data["text"]):
+        text = text.strip()
+        conf = int(data["conf"][i])
+        if text and conf > 30:
             texts.append({
-                "text": text.strip(),
-                "confidence": round(confidence * 100, 1),
-                "bbox": bbox,
+                "text": text,
+                "confidence": conf,
+                "bbox": None,
             })
     return texts
 
 
 def deduplicate_texts(all_frame_texts: list[list[dict]]) -> list[str]:
-    """
-    Remove duplicate texts across frames, return unique Korean/text lines.
-    """
     seen = set()
     unique = []
     for frame_texts in all_frame_texts:
