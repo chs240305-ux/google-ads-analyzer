@@ -245,19 +245,20 @@ if st.session_state.analyzed:
             err = st.session_state.gemini_error
             st.error(f"분석 실패: {err}")
 
-            if "COBALT_TOKEN_REQUIRED" in err:
+            if "DOWNLOAD_FAILED" in err or "COBALT_TOKEN_REQUIRED" in err:
                 st.warning(
-                    "**영상 다운로드에 cobalt API 토큰이 필요합니다**\n\n"
-                    "cobalt.tools는 최근 인증 방식으로 변경되었습니다. "
-                    "무료 토큰 발급 후 Streamlit Secrets에 등록하면 URL만으로 자동 분석이 가능합니다.\n\n"
-                    "**토큰 발급:** [cobalt.tools](https://cobalt.tools) → 설정(⚙️) → API\n\n"
-                    "**Secrets 등록:** Streamlit Cloud → 앱 → Settings → Secrets\n"
-                    "```\nCOBALT_API_TOKEN = \"발급받은_토큰\"\n```\n\n"
-                    "토큰 등록 전까지 아래 파일 업로드로 분석할 수 있습니다."
+                    "**Streamlit Cloud 서버 IP가 YouTube 영상 CDN에 차단되어 있습니다.**\n\n"
+                    "yt-dlp · cobalt · Piped 모두 시도했으나 실패했습니다.\n\n"
+                    "**해결 방법 A (권장) — Railway로 이전:**\n"
+                    "Railway는 YouTube IP 차단 없이 yt-dlp가 작동합니다.\n"
+                    "1. [railway.app](https://railway.app) 무료 계정 생성\n"
+                    "2. New Project → Deploy from GitHub → `google-ads-analyzer` 선택\n"
+                    "3. Variables에 `GEMINI_API_KEY` 설정 → 완료\n\n"
+                    "**해결 방법 B — 파일 직접 업로드 (아래):**"
                 )
 
             # 파일 업로드 대안
-            with st.expander("🗂 MP4 파일 직접 업로드로 분석", expanded=("COBALT_TOKEN_REQUIRED" in err)):
+            with st.expander("🗂 MP4 파일 직접 업로드로 분석", expanded=True):
                 st.caption("YouTube에서 영상을 다운로드한 후 MP4/MOV 파일을 업로드하세요.")
                 uploaded_video = st.file_uploader(
                     "영상 파일 (MP4, MOV · 최대 200MB)",
