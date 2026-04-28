@@ -1,9 +1,12 @@
-streamlit==1.42.0
-youtube-transcript-api==1.2.4
-yt-dlp==2024.12.23
-easyocr==1.7.2
-opencv-python-headless==4.10.0.84
-Pillow==11.1.0
-requests==2.32.3
-numpy==1.26.4
-playwright==1.49.1
+--extra-index-url https://download.pytorch.org/whl/cpu
+streamlit>=1.40.0
+youtube-transcript-api>=1.2.0
+yt-dlp>=2024.12.0
+torch==2.1.0+cpu
+torchvision==0.16.0+cpu
+easyocr>=1.7.0
+opencv-python-headless>=4.8.0
+Pillow>=10.0.0
+requests>=2.30.0
+numpy>=1.24.0,<2.0.0
+playwright>=1.40.0
