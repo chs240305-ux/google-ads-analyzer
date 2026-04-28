@@ -1,7 +1,5 @@
 import streamlit as st
-import tempfile
 import os
-import io
 import subprocess
 import sys
 
@@ -20,13 +18,12 @@ def _ensure_playwright_chromium():
 _ensure_playwright_chromium()
 
 from utils.transcript import extract_video_id, get_transcript, format_timestamp, get_full_text
-from utils.video import get_video_info, download_video, extract_frames, format_view_count, format_upload_date
-from utils.ocr import extract_text_from_image, deduplicate_texts
+from utils.video import get_video_info, format_view_count, format_upload_date
 from utils.transparency import is_transparency_url, extract_youtube_from_transparency
-from utils.gemini_analysis import analyze_with_file_bytes, analyze_from_youtube_url
+from utils.gemini_analysis import analyze_from_youtube_url, analyze_with_file_bytes
 
 st.set_page_config(
-    page_title="YouTube 영상 분석기",
+    page_title="광고 영상 분석기",
     page_icon="▶",
     layout="wide",
 )
@@ -44,13 +41,11 @@ st.markdown("""
 .full-text-box {
     background: #1A1A2E; border: 1px solid #333; border-radius: 8px;
     padding: 16px; font-size: 0.95rem; line-height: 1.8; white-space: pre-wrap;
+    max-height: 400px; overflow-y: auto;
 }
-.ocr-frame-header { color: #FFD700; font-size: 0.85rem; font-weight: 600; margin-bottom: 4px; }
-.ocr-text-item { background: #1E1E1E; border-radius: 6px; padding: 6px 10px; margin: 3px 0; font-size: 0.9rem; }
-.confidence-badge { font-size: 0.75rem; color: #888; margin-left: 8px; }
-.gemini-result {
-    background: #0D1117; border: 1px solid #30363D;
-    border-radius: 10px; padding: 20px; line-height: 1.8;
+.section-header {
+    font-size: 1.1rem; font-weight: 700; color: #FFFFFF;
+    padding: 8px 0; border-bottom: 2px solid #FF0000; margin-bottom: 12px;
 }
 </style>
 """, unsafe_allow_html=True)
@@ -62,11 +57,11 @@ for key, default in [
     ("youtube_url", None),
     ("info", None),
     ("last_url", None),
-    ("ocr_results", None),
     ("gemini_result", None),
+    ("gemini_error", None),
+    ("gemini_auto_pending", False),
     ("transcript", None),
     ("transcript_source", None),
-    ("transcript_loaded_for", None),
 ]:
     if key not in st.session_state:
         st.session_state[key] = default
@@ -79,52 +74,19 @@ def _get_gemini_api_key() -> str:
         return os.environ.get("GEMINI_API_KEY", "")
 
 
-def _display_ocr_results(results: dict, video_id: str) -> None:
-    unique_texts = results["unique_texts"]
-    frame_display_data = results["frames"]
-
-    if unique_texts:
-        st.success(f"총 {len(unique_texts)}개의 텍스트를 감지했습니다.")
-
-        st.markdown("#### 감지된 전체 텍스트 목록")
-        for t in unique_texts:
-            st.markdown(f'<div class="ocr-text-item">📌 {t}</div>', unsafe_allow_html=True)
-
-        if frame_display_data:
-            st.markdown("---")
-            st.markdown("#### 프레임별 상세 결과")
-            cols_per_row = 3
-            for i in range(0, len(frame_display_data), cols_per_row):
-                cols = st.columns(cols_per_row)
-                for j, col in enumerate(cols):
-                    idx = i + j
-                    if idx < len(frame_display_data):
-                        fd = frame_display_data[idx]
-                        with col:
-                            ts = format_timestamp(fd["timestamp"])
-                            st.markdown(f'<div class="ocr-frame-header">⏱ {ts}</div>', unsafe_allow_html=True)
-                            st.image(fd["image_bytes"], use_container_width=True)
-                            for item in fd["texts"]:
-                                st.markdown(
-                                    f'<div class="ocr-text-item">{item["text"]}'
-                                    f'<span class="confidence-badge">{item["confidence"]}%</span>'
-                                    f'</div>',
-                                    unsafe_allow_html=True,
-                                )
-
-        st.download_button(
-            label="화면 텍스트 다운로드 (.txt)",
-            data="\n".join(unique_texts),
-            file_name=f"{video_id}_ocr.txt",
-            mime="text/plain",
-        )
-    else:
-        st.warning("화면에서 감지된 텍스트가 없습니다.")
+def _get_cobalt_token() -> str:
+    try:
+        return st.secrets.get("COBALT_API_TOKEN", "")
+    except Exception:
+        return os.environ.get("COBALT_API_TOKEN", "")
 
 
 # ── 헤더 ─────────────────────────────────────────────────────────
-st.markdown('<div class="main-title">▶ YouTube 영상 분석기</div>', unsafe_allow_html=True)
-st.markdown('<div class="subtitle">YouTube 숏폼 영상의 자막, 대본, 화면 텍스트, AI 영상 분석을 제공합니다</div>', unsafe_allow_html=True)
+st.markdown('<div class="main-title">▶ 광고 영상 분석기</div>', unsafe_allow_html=True)
+st.markdown(
+    '<div class="subtitle">Google 광고 투명성 센터 또는 YouTube URL을 입력하면 자막과 AI 영상 분석을 자동으로 제공합니다</div>',
+    unsafe_allow_html=True,
+)
 
 url_input = st.text_input(
     label="URL 입력",
@@ -140,11 +102,11 @@ with col_tip:
 
 st.divider()
 
-# ── 분석 시작 버튼 처리 ──────────────────────────────────────────
+# ── 분석 버튼 처리 ────────────────────────────────────────────────
 if analyze_btn and url_input:
     if st.session_state.last_url != url_input:
-        st.session_state.ocr_results = None
         st.session_state.gemini_result = None
+        st.session_state.gemini_error = None
 
     youtube_url = url_input
     if is_transparency_url(url_input):
@@ -162,38 +124,44 @@ if analyze_btn and url_input:
         st.error("올바른 YouTube URL 또는 Google 광고 투명성 센터 URL을 입력해주세요.")
         st.stop()
 
-    with st.spinner("영상 정보를 불러오는 중..."):
+    with st.spinner("영상 정보 및 자막 로딩 중..."):
         info = get_video_info(youtube_url)
-
-    if info is None:
-        st.error("영상 정보를 불러올 수 없습니다. URL을 다시 확인해주세요.")
-        st.stop()
+        if info is None:
+            st.error("영상 정보를 불러올 수 없습니다. URL을 다시 확인해주세요.")
+            st.stop()
+        transcript, transcript_source = get_transcript(video_id)
 
     st.session_state.analyzed = True
     st.session_state.video_id = video_id
     st.session_state.youtube_url = youtube_url
     st.session_state.info = info
     st.session_state.last_url = url_input
+    st.session_state.transcript = transcript
+    st.session_state.transcript_source = transcript_source
+    st.session_state.gemini_auto_pending = True  # AI 분석 자동 시작
 
 elif analyze_btn and not url_input:
     st.warning("YouTube URL을 입력해주세요.")
 
-# ── 분석 결과 렌더링 ─────────────────────────────────────────────
+# ── 결과 렌더링 ───────────────────────────────────────────────────
 if st.session_state.analyzed:
     info = st.session_state.info
     video_id = st.session_state.video_id
     youtube_url = st.session_state.youtube_url
+    transcript = st.session_state.transcript
+    transcript_source = st.session_state.transcript_source
 
+    # 영상 정보
     with st.container():
-        c1, c2 = st.columns([1, 2])
+        c1, c2 = st.columns([1, 3])
         with c1:
             if info["thumbnail"]:
                 st.image(info["thumbnail"], use_container_width=True)
         with c2:
             st.markdown(f"### {info['title']}")
             st.markdown(f"**채널:** {info['channel']}")
-            duration_min = info['duration'] // 60
-            duration_sec = info['duration'] % 60
+            duration_min = info["duration"] // 60
+            duration_sec = info["duration"] % 60
             st.markdown(f"**길이:** {duration_min:02d}:{duration_sec:02d}")
             if info["view_count"]:
                 st.markdown(f"**조회수:** {format_view_count(info['view_count'])}회")
@@ -202,216 +170,129 @@ if st.session_state.analyzed:
 
     st.divider()
 
-    tab1, tab2, tab3, tab4 = st.tabs([
-        "📝 자막 / 대본",
-        "🔤 화면 텍스트 (OCR)",
-        "ℹ️ 영상 설명",
-        "🎬 AI 영상 분석 (Gemini)",
-    ])
+    # ── 분할 뷰: 자막 | AI 분석 ──────────────────────────────────
+    left_col, right_col = st.columns(2, gap="large")
 
-    # ── 탭 1: 자막 ─────────────────────────────────────────────
-    with tab1:
-        if st.session_state.transcript_loaded_for != video_id:
-            with st.spinner("자막을 가져오는 중..."):
-                transcript, transcript_source = get_transcript(video_id)
-            st.session_state.transcript = transcript
-            st.session_state.transcript_source = transcript_source
-            st.session_state.transcript_loaded_for = video_id
-        else:
-            transcript = st.session_state.transcript
-            transcript_source = st.session_state.transcript_source
+    # ── 왼쪽: 자막 / 대본 ────────────────────────────────────────
+    with left_col:
+        st.markdown('<div class="section-header">📝 자막 / 대본</div>', unsafe_allow_html=True)
 
         if transcript:
-            st.success(f"자막 {len(transcript)}개 항목을 불러왔습니다. ({transcript_source})")
-            st.markdown("#### 전체 대본 (원본)")
+            st.success(f"자막 {len(transcript)}개 항목 · {transcript_source}")
+            st.caption(
+                "※ 음성 기반 시스템 자막입니다. 편집으로 삽입된 후킹문구·CTA·화면 고정 텍스트 등은 "
+                "우측 AI 분석 **1. 화면 텍스트 & 편집 자막** 항목에서 확인하세요."
+            )
+
             full_text = get_full_text(transcript)
             st.markdown(f'<div class="full-text-box">{full_text}</div>', unsafe_allow_html=True)
-            st.markdown("---")
-            st.markdown("#### 타임스탬프별 자막")
-            for item in transcript:
-                ts = format_timestamp(item["start"])
-                text = item["text"].replace("\n", " ")
-                st.markdown(
-                    f'<div class="transcript-line">'
-                    f'<span class="timestamp-badge">[{ts}]</span>{text}'
-                    f'</div>',
-                    unsafe_allow_html=True,
-                )
-            st.markdown("---")
+
+            with st.expander("타임스탬프별 자막 보기"):
+                for item in transcript:
+                    ts = format_timestamp(item["start"])
+                    text = item["text"].replace("\n", " ")
+                    st.markdown(
+                        f'<div class="transcript-line">'
+                        f'<span class="timestamp-badge">[{ts}]</span>{text}'
+                        f'</div>',
+                        unsafe_allow_html=True,
+                    )
+
             transcript_export = "\n".join(
                 f"[{format_timestamp(item['start'])}] {item['text'].replace(chr(10), ' ')}"
                 for item in transcript
             )
             st.download_button(
-                label="자막 텍스트 다운로드 (.txt)",
+                label="자막 다운로드 (.txt)",
                 data=transcript_export,
                 file_name=f"{video_id}_transcript.txt",
                 mime="text/plain",
             )
         else:
-            st.warning(f"자막을 불러올 수 없습니다: {transcript_source}")
-            if "cloud" in transcript_source.lower() or "ip" in transcript_source.lower() or "blocked" in transcript_source.lower() or "IP" in str(transcript_source):
-                st.info("Streamlit Cloud 서버 IP가 YouTube에 의해 차단되어 자막을 가져올 수 없습니다. AI 영상 분석 탭을 이용해주세요.")
+            st.warning(f"자막 없음: {transcript_source}")
+            if any(kw in str(transcript_source) for kw in ["IP", "cloud", "blocked", "Cloud"]):
+                st.info("Streamlit Cloud 서버 IP가 YouTube에 의해 차단되어 자막을 가져올 수 없습니다.")
             else:
-                st.info("자막이 비활성화되어 있거나 이 영상에는 자막이 제공되지 않을 수 있습니다.")
+                st.info("이 영상에는 자막이 제공되지 않습니다. 우측 AI 분석에서 편집 자막을 확인하세요.")
 
-    # ── 탭 2: 화면 텍스트 OCR ────────────────────────────────────
-    with tab2:
-        # 이미 분석된 결과가 있으면 바로 표시
-        if st.session_state.ocr_results is not None:
-            _display_ocr_results(st.session_state.ocr_results, video_id)
-            if st.button("OCR 다시 분석", key="ocr_reset_btn"):
-                st.session_state.ocr_results = None
-                st.rerun()
-        else:
-            st.info("영상을 다운로드하고 프레임별 한국어 텍스트를 인식합니다.")
-            st.warning("'화면 텍스트 분석 시작' 버튼을 누르면 분석이 시작됩니다. (약 30초~1분 소요)")
-
-            if st.button("화면 텍스트 분석 시작", key="ocr_btn"):
-                download_ok = False
-                with tempfile.TemporaryDirectory() as tmpdir:
-                    progress = st.progress(0, text="영상 다운로드 중...")
-                    video_path = download_video(youtube_url, tmpdir)
-
-                    if not video_path:
-                        progress.empty()
-                        st.error(
-                            "영상 다운로드에 실패했습니다. "
-                            "Streamlit Cloud 환경에서는 일부 YouTube 영상의 다운로드가 제한될 수 있습니다. "
-                            "AI 영상 분석(Gemini) 탭을 이용해주세요."
-                        )
-                    else:
-                        download_ok = True
-                        progress.progress(30, text="프레임 추출 중...")
-                        frames = extract_frames(video_path, interval_seconds=1.5)
-
-                        if not frames:
-                            progress.empty()
-                            st.error("프레임 추출에 실패했습니다.")
-                        else:
-                            progress.progress(50, text=f"OCR 분석 중... ({len(frames)}개 프레임)")
-                            all_frame_results = []
-                            frame_display_data = []
-
-                            for i, frame_data in enumerate(frames):
-                                texts = extract_text_from_image(frame_data["image"])
-                                all_frame_results.append(texts)
-                                if texts:
-                                    buf = io.BytesIO()
-                                    frame_data["image"].save(buf, format="PNG")
-                                    frame_display_data.append({
-                                        "timestamp": frame_data["timestamp"],
-                                        "image_bytes": buf.getvalue(),
-                                        "texts": texts,
-                                    })
-                                pct = 50 + int((i + 1) / len(frames) * 45)
-                                progress.progress(pct, text=f"OCR 분석 중... ({i+1}/{len(frames)})")
-
-                            progress.progress(100, text="완료!")
-                            progress.empty()
-
-                            unique_texts = deduplicate_texts(all_frame_results)
-                            results = {"unique_texts": unique_texts, "frames": frame_display_data}
-                            st.session_state.ocr_results = results
-                            _display_ocr_results(results, video_id)
-
-    # ── 탭 3: 영상 설명 ─────────────────────────────────────────
-    with tab3:
-        if info.get("description"):
-            st.markdown("#### 영상 설명 (원본)")
-            st.markdown(f'<div class="full-text-box">{info["description"]}</div>', unsafe_allow_html=True)
-        else:
-            st.info("영상 설명이 없습니다.")
-
-    # ── 탭 4: AI 영상 분석 (Gemini) ─────────────────────────────
-    with tab4:
-        st.markdown("""
-**Gemini가 실제 영상을 직접 분석합니다.**
-편집 자막 · 화면 구성 · 스토리 흐름 · 바이럴 요소를 분석합니다.
-        """)
+    # ── 오른쪽: AI 영상 분석 ──────────────────────────────────────
+    with right_col:
+        st.markdown('<div class="section-header">🎬 AI 영상 분석</div>', unsafe_allow_html=True)
 
         api_key = _get_gemini_api_key()
+        cobalt_token = _get_cobalt_token()
 
         if not api_key:
-            st.error(
-                "Gemini API 키가 설정되지 않았습니다. "
-                "Streamlit Cloud → Settings → Secrets에서 `GEMINI_API_KEY`를 설정해주세요."
-            )
+            st.error("Gemini API 키 미설정 — Streamlit Cloud → Settings → Secrets에서 `GEMINI_API_KEY` 설정 후 앱 재시작")
+
         elif st.session_state.gemini_result is not None:
-            st.markdown(
-                f'<div class="gemini-result">{st.session_state.gemini_result}</div>',
-                unsafe_allow_html=True,
-            )
+            # 분석 결과 표시
+            with st.container(border=True):
+                st.markdown(st.session_state.gemini_result)
             st.download_button(
                 label="AI 분석 결과 다운로드 (.txt)",
                 data=st.session_state.gemini_result,
                 file_name=f"{video_id}_ai_analysis.txt",
                 mime="text/plain",
             )
-            if st.button("AI 분석 다시 실행", key="gemini_reset_btn"):
+            if st.button("다시 분석", key="gemini_reset_btn"):
                 st.session_state.gemini_result = None
+                st.session_state.gemini_error = None
+                st.session_state.gemini_auto_pending = True
                 st.rerun()
-        else:
-            # ── cobalt 토큰 읽기 ──────────────────────────────────
-            try:
-                cobalt_token = st.secrets.get("COBALT_API_TOKEN", "")
-            except Exception:
-                cobalt_token = os.environ.get("COBALT_API_TOKEN", "")
 
-            # ── 자동 분석: URL → cobalt 다운로드 → Gemini Files API ──
-            st.info(
-                "URL만 입력하면 영상을 자동으로 다운로드하여 Gemini가 실제 영상 내용을 분석합니다."
-            )
+        elif st.session_state.gemini_error is not None:
+            err = st.session_state.gemini_error
+            st.error(f"분석 실패: {err}")
 
-            if not cobalt_token:
+            if "COBALT_TOKEN_REQUIRED" in err:
                 st.warning(
-                    "**cobalt API 토큰 미설정** — 커뮤니티 서버로 시도하지만 실패할 수 있습니다.\n\n"
-                    "안정적인 사용을 위해 아래를 설정해주세요:\n"
-                    "1. [cobalt.tools](https://cobalt.tools) 에서 무료 API 토큰 발급\n"
-                    "2. Streamlit Cloud → Settings → Secrets 에 `COBALT_API_TOKEN = \"your_token\"` 추가"
+                    "**영상 다운로드에 cobalt API 토큰이 필요합니다**\n\n"
+                    "cobalt.tools는 최근 인증 방식으로 변경되었습니다. "
+                    "무료 토큰 발급 후 Streamlit Secrets에 등록하면 URL만으로 자동 분석이 가능합니다.\n\n"
+                    "**토큰 발급:** [cobalt.tools](https://cobalt.tools) → 설정(⚙️) → API\n\n"
+                    "**Secrets 등록:** Streamlit Cloud → 앱 → Settings → Secrets\n"
+                    "```\nCOBALT_API_TOKEN = \"발급받은_토큰\"\n```\n\n"
+                    "토큰 등록 전까지 아래 파일 업로드로 분석할 수 있습니다."
                 )
 
-            if st.button("🚀 AI 자동 분석 시작", key="gemini_auto_btn", type="primary"):
-                with st.spinner("영상 다운로드 및 Gemini 분석 중... (약 1~3분 소요)"):
-                    try:
-                        result = analyze_from_youtube_url(youtube_url, api_key, cobalt_token)
-                        st.session_state.gemini_result = result
-                        st.toast("✅ AI 분석 완료!")
-                        st.rerun()
-                    except Exception as e:
-                        err_msg = str(e)
-                        if "COBALT_TOKEN_REQUIRED" in err_msg:
-                            st.error("cobalt API 토큰이 필요합니다.")
-                            st.info(
-                                "**해결 방법:**\n"
-                                "1. [cobalt.tools](https://cobalt.tools) 에서 무료 API 토큰 발급\n"
-                                "2. Streamlit Cloud → Settings → Secrets 에 아래 내용 추가 후 앱 재시작:\n"
-                                "```\nCOBALT_API_TOKEN = \"your_token_here\"\n```\n"
-                                "또는 아래 '직접 업로드'로 MP4 파일을 직접 올려 분석하세요."
-                            )
-                        else:
-                            st.error(f"자동 분석 실패: {err_msg}")
-                            st.warning("아래 '직접 업로드'로 MP4 파일을 업로드하면 분석할 수 있습니다.")
-
-            st.markdown("---")
-
-            # ── 대안: 파일 직접 업로드 ────────────────────────────
-            with st.expander("직접 업로드 (자동 분석 실패 시 대안)"):
-                st.caption("YouTube에서 다운로드한 MP4/MOV 파일을 업로드하면 Gemini가 실제 영상을 분석합니다.")
+            # 파일 업로드 대안
+            with st.expander("🗂 MP4 파일 직접 업로드로 분석", expanded=("COBALT_TOKEN_REQUIRED" in err)):
+                st.caption("YouTube에서 영상을 다운로드한 후 MP4/MOV 파일을 업로드하세요.")
                 uploaded_video = st.file_uploader(
-                    "영상 파일 선택 (MP4, MOV · 최대 200MB)",
+                    "영상 파일 (MP4, MOV · 최대 200MB)",
                     type=["mp4", "mov"],
-                    key="gemini_video_upload",
+                    key="gemini_upload_fallback",
                 )
                 if uploaded_video:
-                    if st.button("파일로 AI 분석 시작", key="gemini_file_btn"):
+                    if st.button("파일로 AI 분석 시작", key="gemini_file_fallback_btn", type="primary"):
                         video_bytes = uploaded_video.read()
                         mime_type = "video/quicktime" if uploaded_video.name.lower().endswith(".mov") else "video/mp4"
-                        with st.spinner("Gemini에 파일 업로드 및 분석 중... (1~3분 소요)"):
+                        with st.spinner("Gemini 분석 중... (1~3분 소요)"):
                             try:
                                 result = analyze_with_file_bytes(video_bytes, mime_type, api_key)
                                 st.session_state.gemini_result = result
-                                st.toast("✅ AI 분석 완료!")
+                                st.session_state.gemini_error = None
+                                st.session_state.gemini_auto_pending = False
                                 st.rerun()
                             except Exception as e:
-                                st.error(f"분석 실패: {e}")
+                                st.error(f"파일 분석 실패: {e}")
+
+            if st.button("자동 분석 다시 시도", key="gemini_retry_btn"):
+                st.session_state.gemini_error = None
+                st.session_state.gemini_auto_pending = True
+                st.rerun()
+
+        elif st.session_state.gemini_auto_pending:
+            # AI 분석 자동 실행
+            with st.spinner("🎬 AI가 실제 영상을 분석하는 중... (약 1~3분 소요)"):
+                try:
+                    result = analyze_from_youtube_url(youtube_url, api_key, cobalt_token)
+                    st.session_state.gemini_result = result
+                    st.session_state.gemini_error = None
+                except Exception as e:
+                    st.session_state.gemini_error = str(e)
+                    st.session_state.gemini_result = None
+                finally:
+                    st.session_state.gemini_auto_pending = False
+            st.rerun()
