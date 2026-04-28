@@ -23,7 +23,7 @@ from utils.transcript import extract_video_id, get_transcript, format_timestamp,
 from utils.video import get_video_info, download_video, extract_frames, format_view_count, format_upload_date
 from utils.ocr import extract_text_from_image, deduplicate_texts
 from utils.transparency import is_transparency_url, extract_youtube_from_transparency
-from utils.gemini_analysis import analyze_with_url, analyze_with_file_bytes
+from utils.gemini_analysis import analyze_with_file_bytes, analyze_from_youtube_url
 
 st.set_page_config(
     page_title="YouTube 영상 분석기",
@@ -250,7 +250,10 @@ if st.session_state.analyzed:
             )
         else:
             st.warning(f"자막을 불러올 수 없습니다: {transcript_source}")
-            st.info("자막이 비활성화되어 있거나 이 영상에는 자막이 제공되지 않을 수 있습니다.")
+            if "cloud" in transcript_source.lower() or "ip" in transcript_source.lower() or "blocked" in transcript_source.lower() or "IP" in str(transcript_source):
+                st.info("Streamlit Cloud 서버 IP가 YouTube에 의해 차단되어 자막을 가져올 수 없습니다. AI 영상 분석 탭을 이용해주세요.")
+            else:
+                st.info("자막이 비활성화되어 있거나 이 영상에는 자막이 제공되지 않을 수 있습니다.")
 
     # ── 탭 2: 화면 텍스트 OCR ────────────────────────────────────
     with tab2:
@@ -349,65 +352,46 @@ if st.session_state.analyzed:
                 st.session_state.gemini_result = None
                 st.rerun()
         else:
-            # ── 방법 1: 영상 파일 직접 업로드 (권장) ─────────────
-            st.markdown("#### 방법 1: 영상 파일 업로드 (권장)")
-            st.caption("YouTube에서 다운로드한 MP4/MOV 파일을 업로드하면 Gemini가 실제 영상을 분석합니다.")
-
-            uploaded_video = st.file_uploader(
-                "영상 파일 선택 (MP4, MOV · 최대 200MB)",
-                type=["mp4", "mov"],
-                key="gemini_video_upload",
+            # ── 자동 분석: URL → cobalt 다운로드 → Gemini Files API ──
+            st.info(
+                "URL만 입력하면 영상을 자동으로 다운로드하여 Gemini가 실제 영상 내용을 분석합니다.\n"
+                "광고 투명성 센터 URL도 자동으로 처리됩니다."
             )
 
-            if uploaded_video:
-                if st.button("파일로 AI 분석 시작", key="gemini_file_btn", type="primary"):
-                    video_bytes = uploaded_video.read()
-                    mime_type = "video/quicktime" if uploaded_video.name.lower().endswith(".mov") else "video/mp4"
-                    with st.spinner("Gemini에 파일 업로드 및 분석 중... (1~3분 소요)"):
-                        try:
-                            result = analyze_with_file_bytes(video_bytes, mime_type, api_key)
-                            st.session_state.gemini_result = result
-                            st.toast("✅ AI 분석 완료!")
-                            st.markdown(
-                                f'<div class="gemini-result">{result}</div>',
-                                unsafe_allow_html=True,
-                            )
-                            st.download_button(
-                                label="AI 분석 결과 다운로드 (.txt)",
-                                data=result,
-                                file_name=f"{video_id}_ai_analysis.txt",
-                                mime="text/plain",
-                            )
-                        except Exception as e:
-                            st.error(f"분석 실패: {e}")
+            if st.button("🚀 AI 자동 분석 시작", key="gemini_auto_btn", type="primary"):
+                with st.spinner("영상 다운로드 및 Gemini 분석 중... (약 1~3분 소요)"):
+                    try:
+                        result = analyze_from_youtube_url(youtube_url, api_key)
+                        st.session_state.gemini_result = result
+                        st.toast("✅ AI 분석 완료!")
+                        st.rerun()
+                    except Exception as e:
+                        err_msg = str(e)
+                        st.error(f"자동 분석 실패: {err_msg}")
+                        if "cobalt" in err_msg.lower() or "429" in err_msg or "rate" in err_msg.lower():
+                            st.warning("cobalt 서비스 일시 오류입니다. 잠시 후 다시 시도하거나 아래 직접 업로드를 이용해주세요.")
+                        else:
+                            st.warning("아래 '직접 업로드'로 MP4 파일을 업로드하면 분석할 수 있습니다.")
 
             st.markdown("---")
 
-            # ── 방법 2: YouTube URL 직접 시도 ─────────────────────
-            st.markdown("#### 방법 2: YouTube URL로 직접 분석 (API 권한에 따라 작동 여부 다름)")
-            st.caption("일부 API 키 설정에서는 작동하지 않을 수 있습니다. 실패 시 방법 1을 이용하세요.")
-
-            if st.button("URL로 AI 분석 시작", key="gemini_url_btn"):
-                with st.spinner("Gemini가 YouTube 영상을 분석하는 중..."):
-                    try:
-                        result = analyze_with_url(youtube_url, api_key)
-                        st.session_state.gemini_result = result
-                        st.toast("✅ AI 분석 완료!")
-                        st.markdown(
-                            f'<div class="gemini-result">{result}</div>',
-                            unsafe_allow_html=True,
-                        )
-                        st.download_button(
-                            label="AI 분석 결과 다운로드 (.txt)",
-                            data=result,
-                            file_name=f"{video_id}_ai_analysis.txt",
-                            mime="text/plain",
-                        )
-                    except Exception as e:
-                        if "403" in str(e) or "PERMISSION" in str(e):
-                            st.warning(
-                                "YouTube URL 직접 분석 권한이 없습니다. "
-                                "위의 '방법 1: 영상 파일 업로드'를 이용해주세요."
-                            )
-                        else:
-                            st.error(f"분석 실패: {e}")
+            # ── 대안: 파일 직접 업로드 ────────────────────────────
+            with st.expander("직접 업로드 (자동 분석 실패 시 대안)"):
+                st.caption("YouTube에서 다운로드한 MP4/MOV 파일을 업로드하면 Gemini가 실제 영상을 분석합니다.")
+                uploaded_video = st.file_uploader(
+                    "영상 파일 선택 (MP4, MOV · 최대 200MB)",
+                    type=["mp4", "mov"],
+                    key="gemini_video_upload",
+                )
+                if uploaded_video:
+                    if st.button("파일로 AI 분석 시작", key="gemini_file_btn"):
+                        video_bytes = uploaded_video.read()
+                        mime_type = "video/quicktime" if uploaded_video.name.lower().endswith(".mov") else "video/mp4"
+                        with st.spinner("Gemini에 파일 업로드 및 분석 중... (1~3분 소요)"):
+                            try:
+                                result = analyze_with_file_bytes(video_bytes, mime_type, api_key)
+                                st.session_state.gemini_result = result
+                                st.toast("✅ AI 분석 완료!")
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"분석 실패: {e}")

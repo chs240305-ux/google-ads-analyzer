@@ -42,7 +42,13 @@ ANALYSIS_PROMPT = """이 유튜브 영상을 전문 영상 크리에이터의 �
 한국어로 구체적이고 상세하게 작성해주세요. 실제 영상에서 관찰한 내용만 작성하세요."""
 
 _BASE = "https://generativelanguage.googleapis.com"
-_MODEL = "gemini-1.5-pro"
+_MODEL = "gemini-2.0-flash"
+
+_COBALT_HEADERS = {
+    "Accept": "application/json",
+    "Content-Type": "application/json",
+    "User-Agent": "Mozilla/5.0 (compatible; VideoAnalyzer/1.0)",
+}
 
 
 def _generate_content(payload: dict, api_key: str) -> str:
@@ -60,6 +66,57 @@ def _generate_content(payload: dict, api_key: str) -> str:
         raise RuntimeError(f"응답 파싱 실패: {resp.text[:200]}") from e
 
 
+def download_via_cobalt(youtube_url: str) -> tuple[bytes, str]:
+    """cobalt.tools를 프록시로 YouTube 영상을 다운로드합니다."""
+    resp = requests.post(
+        "https://api.cobalt.tools/",
+        json={
+            "url": youtube_url,
+            "videoQuality": "720",
+            "filenameStyle": "basic",
+            "downloadMode": "auto",
+        },
+        headers=_COBALT_HEADERS,
+        timeout=30,
+    )
+    if resp.status_code != 200:
+        raise RuntimeError(f"cobalt API 오류 {resp.status_code}: {resp.text[:300]}")
+
+    data = resp.json()
+    status = data.get("status")
+
+    if status == "error":
+        code = data.get("error", {}).get("code", "unknown")
+        raise RuntimeError(f"cobalt 다운로드 실패: {code}")
+
+    if status == "picker":
+        # 여러 파일 중 첫 번째 선택
+        download_url = data["picker"][0]["url"]
+    elif status in ("stream", "tunnel", "redirect"):
+        download_url = data["url"]
+    else:
+        raise RuntimeError(f"cobalt 예상치 못한 응답: {status}")
+
+    video_resp = requests.get(
+        download_url,
+        headers={"User-Agent": "Mozilla/5.0"},
+        timeout=300,
+        stream=True,
+    )
+    video_resp.raise_for_status()
+
+    content_type = video_resp.headers.get("Content-Type", "video/mp4")
+    mime_type = content_type.split(";")[0].strip() if "video" in content_type else "video/mp4"
+
+    return video_resp.content, mime_type
+
+
+def analyze_from_youtube_url(youtube_url: str, api_key: str) -> str:
+    """YouTube URL → cobalt 다운로드 → Gemini Files API 분석 자동 파이프라인."""
+    video_bytes, mime_type = download_via_cobalt(youtube_url)
+    return analyze_with_file_bytes(video_bytes, mime_type, api_key)
+
+
 def analyze_with_url(youtube_url: str, api_key: str) -> str:
     """YouTube URL을 Gemini에 직접 전달해 분석 (API 권한에 따라 작동 여부 다름)."""
     payload = {
@@ -74,7 +131,6 @@ def analyze_with_url(youtube_url: str, api_key: str) -> str:
 
 def analyze_with_file_bytes(video_bytes: bytes, mime_type: str, api_key: str) -> str:
     """영상 파일을 Gemini Files API에 업로드 후 분석."""
-    # 1. 업로드
     boundary = "gemini_upload_bound"
     meta = json.dumps({"file": {"display_name": "video_analysis"}})
     body = (
@@ -95,9 +151,8 @@ def analyze_with_file_bytes(video_bytes: bytes, mime_type: str, api_key: str) ->
     file_uri = file_info["uri"]
     file_name = file_info["name"]
 
-    # 2. ACTIVE 상태 대기
     try:
-        for _ in range(24):  # 최대 2분
+        for _ in range(24):  # 최대 2분 대기
             st_resp = requests.get(
                 f"{_BASE}/v1beta/{file_name}",
                 params={"key": api_key},
@@ -114,7 +169,6 @@ def analyze_with_file_bytes(video_bytes: bytes, mime_type: str, api_key: str) ->
         else:
             raise TimeoutError("파일 처리 시간 초과 (2분)")
 
-        # 3. 분석
         payload = {
             "contents": [{"parts": [
                 {"fileData": {"fileUri": file_uri, "mimeType": mime_type}},
@@ -125,7 +179,6 @@ def analyze_with_file_bytes(video_bytes: bytes, mime_type: str, api_key: str) ->
         return _generate_content(payload, api_key)
 
     finally:
-        # 4. 파일 삭제
         try:
             requests.delete(
                 f"{_BASE}/v1beta/{file_name}",
