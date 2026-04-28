@@ -20,7 +20,7 @@ _ensure_playwright_chromium()
 from utils.transcript import extract_video_id, get_transcript, format_timestamp, get_full_text
 from utils.video import get_video_info, format_view_count, format_upload_date
 from utils.transparency import is_transparency_url, extract_youtube_from_transparency
-from utils.gemini_analysis import analyze_from_youtube_url, analyze_with_file_bytes
+from utils.gemini_analysis import analyze_from_youtube_url, analyze_with_file_bytes, analyze_with_thumbnail
 
 st.set_page_config(
     page_title="광고 영상 분석기",
@@ -245,19 +245,6 @@ if st.session_state.analyzed:
             err = st.session_state.gemini_error
             st.error(f"분석 실패: {err}")
 
-            if "DOWNLOAD_FAILED" in err or "COBALT_TOKEN_REQUIRED" in err:
-                st.warning(
-                    "**Streamlit Cloud 서버 IP가 YouTube 영상 CDN에 차단되어 있습니다.**\n\n"
-                    "yt-dlp · cobalt · Piped 모두 시도했으나 실패했습니다.\n\n"
-                    "**해결 방법 A (권장) — Railway로 이전:**\n"
-                    "Railway는 YouTube IP 차단 없이 yt-dlp가 작동합니다.\n"
-                    "1. [railway.app](https://railway.app) 무료 계정 생성\n"
-                    "2. New Project → Deploy from GitHub → `google-ads-analyzer` 선택\n"
-                    "3. Variables에 `GEMINI_API_KEY` 설정 → 완료\n\n"
-                    "**해결 방법 B — 파일 직접 업로드 (아래):**"
-                )
-
-            # 파일 업로드 대안
             with st.expander("🗂 MP4 파일 직접 업로드로 분석", expanded=True):
                 st.caption("YouTube에서 영상을 다운로드한 후 MP4/MOV 파일을 업로드하세요.")
                 uploaded_video = st.file_uploader(
@@ -279,21 +266,32 @@ if st.session_state.analyzed:
                             except Exception as e:
                                 st.error(f"파일 분석 실패: {e}")
 
-            if st.button("자동 분석 다시 시도", key="gemini_retry_btn"):
+            if st.button("다시 시도", key="gemini_retry_btn"):
                 st.session_state.gemini_error = None
                 st.session_state.gemini_auto_pending = True
                 st.rerun()
 
         elif st.session_state.gemini_auto_pending:
-            # AI 분석 자동 실행
-            with st.spinner("🎬 AI가 실제 영상을 분석하는 중... (약 1~3분 소요)"):
+            # AI 분석 자동 실행 (영상 다운로드 실패 시 썸네일+자막으로 자동 폴백)
+            with st.spinner("🎬 AI가 영상을 분석하는 중... (약 1~2분 소요)"):
                 try:
                     result = analyze_from_youtube_url(youtube_url, api_key, cobalt_token)
                     st.session_state.gemini_result = result
                     st.session_state.gemini_error = None
                 except Exception as e:
-                    st.session_state.gemini_error = str(e)
-                    st.session_state.gemini_result = None
+                    if "DOWNLOAD_FAILED" in str(e):
+                        # 썸네일 + 자막 폴백
+                        try:
+                            transcript_text = get_full_text(transcript) if transcript else ""
+                            result = analyze_with_thumbnail(video_id, transcript_text, api_key)
+                            st.session_state.gemini_result = result
+                            st.session_state.gemini_error = None
+                        except Exception as e2:
+                            st.session_state.gemini_error = str(e2)
+                            st.session_state.gemini_result = None
+                    else:
+                        st.session_state.gemini_error = str(e)
+                        st.session_state.gemini_result = None
                 finally:
                     st.session_state.gemini_auto_pending = False
             st.rerun()

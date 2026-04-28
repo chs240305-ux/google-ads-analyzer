@@ -208,6 +208,83 @@ def download_via_piped(video_id: str) -> tuple[bytes, str]:
     raise RuntimeError("Piped 다운로드 실패")
 
 
+# ── 썸네일 + 자막 분석 (Streamlit Cloud 폴백) ───────────────────────
+def _fetch_thumbnail(video_id: str) -> bytes | None:
+    """i.ytimg.com에서 YouTube 썸네일을 다운로드합니다 (IP 차단 없음)."""
+    for quality in ["maxresdefault", "hq720", "hqdefault"]:
+        try:
+            resp = requests.get(
+                f"https://i.ytimg.com/vi/{video_id}/{quality}.jpg",
+                timeout=15,
+            )
+            if resp.ok and len(resp.content) > 5000:
+                return resp.content
+        except Exception:
+            continue
+    return None
+
+
+def analyze_with_thumbnail(
+    video_id: str,
+    transcript_text: str,
+    api_key: str,
+) -> str:
+    """썸네일 이미지 + 자막으로 Gemini 분석 (영상 다운로드 불가 환경의 폴백)."""
+    import base64
+
+    thumb_bytes = _fetch_thumbnail(video_id)
+    parts: list[dict] = []
+
+    if thumb_bytes:
+        parts.append({
+            "inlineData": {
+                "data": base64.b64encode(thumb_bytes).decode(),
+                "mimeType": "image/jpeg",
+            }
+        })
+
+    has_transcript = bool(transcript_text and transcript_text.strip())
+    transcript_section = (
+        f"## 2. 📝 자막 / 대본 분석\n\n**전체 자막:**\n{transcript_text[:4000]}\n\n"
+        "- 오프닝 훅 / 후킹 문구 분석\n"
+        "- 내용 전개 방식\n"
+        "- CTA / 마무리 메시지"
+        if has_transcript else
+        "## 2. 📝 자막 분석\n자막 없음 — 썸네일 기반으로만 분석합니다."
+    )
+
+    prompt = f"""이 YouTube 광고의 썸네일{"과 자막" if has_transcript else ""}을 분석해주세요.
+
+## 1. 🖼️ 썸네일 & 시각 요소
+- 썸네일에 보이는 텍스트, 강조 문구, 이모지
+- 인물, 제품, 배경 구성
+- 색감, 폰트, 전체 시각적 톤
+- 클릭 유도 요소 (호기심, 긴급성, 감정 등)
+- 썸네일이 전달하는 핵심 메시지
+
+{transcript_section}
+
+## 3. 🔥 바이럴 DNA 분석
+- 감정적 트리거 요소
+- 타겟 오디언스 추정 (연령대, 관심사 등)
+- 이 광고에서 배울 수 있는 핵심 인사이트 3가지
+
+한국어로 구체적이고 상세하게 분석해주세요."""
+
+    parts.append({"text": prompt})
+
+    payload = {
+        "contents": [{"parts": parts}],
+        "generationConfig": {"temperature": 0.3},
+    }
+    result = _generate_content(payload, api_key)
+    return (
+        "> 📌 **썸네일 + 자막 기반 분석** "
+        "*(Streamlit Cloud IP 제한으로 전체 영상 대신 썸네일 분석 적용)*\n\n"
+        + result
+    )
+
+
 # ── 통합 분석 함수 ───────────────────────────────────────────────────
 def analyze_from_youtube_url(youtube_url: str, api_key: str, cobalt_token: str = "") -> str:
     """YouTube URL → 다운로드(yt-dlp → cobalt → Piped 순서) → Gemini Files API 분석."""
