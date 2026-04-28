@@ -352,25 +352,45 @@ if st.session_state.analyzed:
                 st.session_state.gemini_result = None
                 st.rerun()
         else:
+            # ── cobalt 토큰 읽기 ──────────────────────────────────
+            try:
+                cobalt_token = st.secrets.get("COBALT_API_TOKEN", "")
+            except Exception:
+                cobalt_token = os.environ.get("COBALT_API_TOKEN", "")
+
             # ── 자동 분석: URL → cobalt 다운로드 → Gemini Files API ──
             st.info(
-                "URL만 입력하면 영상을 자동으로 다운로드하여 Gemini가 실제 영상 내용을 분석합니다.\n"
-                "광고 투명성 센터 URL도 자동으로 처리됩니다."
+                "URL만 입력하면 영상을 자동으로 다운로드하여 Gemini가 실제 영상 내용을 분석합니다."
             )
+
+            if not cobalt_token:
+                st.warning(
+                    "**cobalt API 토큰 미설정** — 커뮤니티 서버로 시도하지만 실패할 수 있습니다.\n\n"
+                    "안정적인 사용을 위해 아래를 설정해주세요:\n"
+                    "1. [cobalt.tools](https://cobalt.tools) 에서 무료 API 토큰 발급\n"
+                    "2. Streamlit Cloud → Settings → Secrets 에 `COBALT_API_TOKEN = \"your_token\"` 추가"
+                )
 
             if st.button("🚀 AI 자동 분석 시작", key="gemini_auto_btn", type="primary"):
                 with st.spinner("영상 다운로드 및 Gemini 분석 중... (약 1~3분 소요)"):
                     try:
-                        result = analyze_from_youtube_url(youtube_url, api_key)
+                        result = analyze_from_youtube_url(youtube_url, api_key, cobalt_token)
                         st.session_state.gemini_result = result
                         st.toast("✅ AI 분석 완료!")
                         st.rerun()
                     except Exception as e:
                         err_msg = str(e)
-                        st.error(f"자동 분석 실패: {err_msg}")
-                        if "cobalt" in err_msg.lower() or "429" in err_msg or "rate" in err_msg.lower():
-                            st.warning("cobalt 서비스 일시 오류입니다. 잠시 후 다시 시도하거나 아래 직접 업로드를 이용해주세요.")
+                        if "COBALT_TOKEN_REQUIRED" in err_msg:
+                            st.error("cobalt API 토큰이 필요합니다.")
+                            st.info(
+                                "**해결 방법:**\n"
+                                "1. [cobalt.tools](https://cobalt.tools) 에서 무료 API 토큰 발급\n"
+                                "2. Streamlit Cloud → Settings → Secrets 에 아래 내용 추가 후 앱 재시작:\n"
+                                "```\nCOBALT_API_TOKEN = \"your_token_here\"\n```\n"
+                                "또는 아래 '직접 업로드'로 MP4 파일을 직접 올려 분석하세요."
+                            )
                         else:
+                            st.error(f"자동 분석 실패: {err_msg}")
                             st.warning("아래 '직접 업로드'로 MP4 파일을 업로드하면 분석할 수 있습니다.")
 
             st.markdown("---")

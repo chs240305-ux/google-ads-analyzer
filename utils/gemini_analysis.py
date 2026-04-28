@@ -44,11 +44,18 @@ ANALYSIS_PROMPT = """이 유튜브 영상을 전문 영상 크리에이터의 �
 _BASE = "https://generativelanguage.googleapis.com"
 _MODEL = "gemini-2.0-flash"
 
-_COBALT_HEADERS = {
+_COBALT_BASE_HEADERS = {
     "Accept": "application/json",
     "Content-Type": "application/json",
     "User-Agent": "Mozilla/5.0 (compatible; VideoAnalyzer/1.0)",
 }
+
+# 공식 인스턴스 + 커뮤니티 인스턴스 (인증 불필요한 것 우선 시도)
+_COBALT_INSTANCES = [
+    ("https://cobalt.privacydev.net", False),
+    ("https://cobalt.api.timelessnesses.me", False),
+    ("https://api.cobalt.tools", True),  # 공식: 토큰 필요
+]
 
 
 def _generate_content(payload: dict, api_key: str) -> str:
@@ -66,54 +73,80 @@ def _generate_content(payload: dict, api_key: str) -> str:
         raise RuntimeError(f"응답 파싱 실패: {resp.text[:200]}") from e
 
 
-def download_via_cobalt(youtube_url: str) -> tuple[bytes, str]:
-    """cobalt.tools를 프록시로 YouTube 영상을 다운로드합니다."""
-    resp = requests.post(
-        "https://api.cobalt.tools/",
-        json={
-            "url": youtube_url,
-            "videoQuality": "720",
-            "filenameStyle": "basic",
-            "downloadMode": "auto",
-        },
-        headers=_COBALT_HEADERS,
-        timeout=30,
-    )
-    if resp.status_code != 200:
-        raise RuntimeError(f"cobalt API 오류 {resp.status_code}: {resp.text[:300]}")
+def download_via_cobalt(youtube_url: str, cobalt_token: str = "") -> tuple[bytes, str]:
+    """cobalt를 프록시로 YouTube 영상을 다운로드합니다. 여러 인스턴스를 순차 시도합니다."""
+    body = {
+        "url": youtube_url,
+        "videoQuality": "720",
+        "filenameStyle": "basic",
+        "downloadMode": "auto",
+    }
+    last_error = "알 수 없는 오류"
 
-    data = resp.json()
-    status = data.get("status")
+    for instance_url, requires_token in _COBALT_INSTANCES:
+        if requires_token and not cobalt_token:
+            continue  # 토큰 없으면 공식 인스턴스 건너뜀
 
-    if status == "error":
-        code = data.get("error", {}).get("code", "unknown")
-        raise RuntimeError(f"cobalt 다운로드 실패: {code}")
+        headers = _COBALT_BASE_HEADERS.copy()
+        if requires_token and cobalt_token:
+            headers["Authorization"] = f"Api-Key {cobalt_token}"
 
-    if status == "picker":
-        # 여러 파일 중 첫 번째 선택
-        download_url = data["picker"][0]["url"]
-    elif status in ("stream", "tunnel", "redirect"):
-        download_url = data["url"]
-    else:
-        raise RuntimeError(f"cobalt 예상치 못한 응답: {status}")
+        try:
+            resp = requests.post(
+                f"{instance_url}/",
+                json=body,
+                headers=headers,
+                timeout=20,
+            )
+        except Exception as e:
+            last_error = str(e)
+            continue
 
-    video_resp = requests.get(
-        download_url,
-        headers={"User-Agent": "Mozilla/5.0"},
-        timeout=300,
-        stream=True,
-    )
-    video_resp.raise_for_status()
+        if resp.status_code == 400 and "jwt" in resp.text.lower():
+            last_error = "토큰_필요"
+            continue
+        if resp.status_code != 200:
+            last_error = f"HTTP {resp.status_code}"
+            continue
 
-    content_type = video_resp.headers.get("Content-Type", "video/mp4")
-    mime_type = content_type.split(";")[0].strip() if "video" in content_type else "video/mp4"
+        data = resp.json()
+        status = data.get("status")
 
-    return video_resp.content, mime_type
+        if status == "error":
+            last_error = data.get("error", {}).get("code", "unknown")
+            continue
+
+        if status == "picker":
+            download_url = data["picker"][0]["url"]
+        elif status in ("stream", "tunnel", "redirect"):
+            download_url = data["url"]
+        else:
+            last_error = f"예상치 못한 응답: {status}"
+            continue
+
+        try:
+            video_resp = requests.get(
+                download_url,
+                headers={"User-Agent": "Mozilla/5.0"},
+                timeout=300,
+                stream=True,
+            )
+            video_resp.raise_for_status()
+            content_type = video_resp.headers.get("Content-Type", "video/mp4")
+            mime_type = content_type.split(";")[0].strip() if "video" in content_type else "video/mp4"
+            return video_resp.content, mime_type
+        except Exception as e:
+            last_error = str(e)
+            continue
+
+    if last_error == "토큰_필요":
+        raise RuntimeError("COBALT_TOKEN_REQUIRED")
+    raise RuntimeError(f"모든 cobalt 인스턴스 실패: {last_error}")
 
 
-def analyze_from_youtube_url(youtube_url: str, api_key: str) -> str:
+def analyze_from_youtube_url(youtube_url: str, api_key: str, cobalt_token: str = "") -> str:
     """YouTube URL → cobalt 다운로드 → Gemini Files API 분석 자동 파이프라인."""
-    video_bytes, mime_type = download_via_cobalt(youtube_url)
+    video_bytes, mime_type = download_via_cobalt(youtube_url, cobalt_token)
     return analyze_with_file_bytes(video_bytes, mime_type, api_key)
 
 
